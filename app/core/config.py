@@ -17,12 +17,22 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str
 
     CORS_ORIGINS: List[str] = ["*"]
-    
+
     # IMP: LangChain 객체 및 LLM 연동에 사용되는 필수 설정값(API Key 등)
     # LangChain 설정
     OPENAI_API_KEY: str
     OPENAI_MODEL: str
-    
+
+    # Elasticsearch 설정
+    ES_URL: str = "https://elasticsearch-edu.didim365.app"
+    ES_USER: str = "elastic"
+    ES_PASSWORD: str = ""
+    ES_INDEX_NAME: str = "edu-collection"
+
+    # 공공 API 키 (식품의약품안전처 / 건강보험심사평가원)
+    MFDS_API_KEY: str = ""
+    HIRA_API_KEY: str = ""
+
     # 기본 설정 (추가 환경변수가 필요하면 여기에 추가하세요)
 
     # IMP: DeepAgents 라이브러리 실행 시 Graph 에이전트의 최대 재귀 호출 횟수(Recursion Limit) 설정

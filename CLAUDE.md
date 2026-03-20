@@ -17,8 +17,12 @@ uv run pytest
 # Run a single test
 uv run pytest tests/test_main.py::test_health -v
 
-# Run Opik evaluation
-uv run python -m app.eval.run_opik_eval --dataset yja-dataset
+# Create / update Opik dataset
+uv run python -m app.eval.create_dataset --dataset yja-dataset
+uv run python -m app.eval.create_dataset --dataset yja-dataset --overwrite  # 기존 아이템 교체
+
+# Run Opik evaluation (dataset must exist first)
+uv run python -m app.eval.run_opik_eval --dataset yja-dataset --experiment exp-v1
 
 # Lint / format
 uv run ruff check .
@@ -74,7 +78,9 @@ Each SSE event is a JSON object with a `step` field:
 
 **`app/core/config.py`** — Pydantic `Settings` with nested `OpikSettings`. Uses `env_nested_delimiter="__"` so `OPIK__PROJECT` maps to `settings.OPIK.PROJECT`.
 
-**`app/eval/run_opik_eval.py`** — CLI script that pulls a named dataset from Opik, runs each item through `AgentService`, and scores with the `Equals` metric.
+**`app/eval/create_dataset.py`** — Uploads 20 hardcoded items (10 medical / 10 non-medical) to an Opik dataset. Non-medical items assert the agent should refuse. Run this before the eval script.
+
+**`app/eval/run_opik_eval.py`** — CLI script that pulls a named dataset from Opik, runs each item through `AgentService`, and scores with the `Equals` metric. Dataset items use `input`/`expected_output` keys; `category` field can be used to split medical vs. non-medical experiments.
 
 ### Conversation Persistence
 

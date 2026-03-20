@@ -7,28 +7,23 @@ from elasticsearch import Elasticsearch
 from langchain.tools import tool
 from langchain_elasticsearch import ElasticsearchRetriever
 
+from app.core.config import settings
+
 # ---------------------------------------------------------------------------
 # Elasticsearch 연결 설정
 # ---------------------------------------------------------------------------
 
-_ES_URL = "https://elasticsearch-edu.didim365.app"
-_ES_USER = "elastic"
-_ES_PASSWORD = "FJl79PA7mMIJajxB1OHgdLEe"
-_INDEX_NAME = "edu-collection"
 _CONTENT_FIELD = "content"
 _TOP_K = 5
 
 # 식품의약품안전처(e약은요) API
 _DRUG_API_URL = "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList"
-_DRUG_API_KEY = "72c6779aea30770c96a2620ae1c96d6acb8ab33c5c1fdb404b91ac8864927e0e"
 
 # 식품의약품안전처 DUR 병용금기 API
 _DUR_API_URL = "https://apis.data.go.kr/1471000/DURInfrService01/getUsjntTabooInfoList01"
-_DUR_API_KEY = _DRUG_API_KEY
 
 # 건강보험심사평가원 병원정보서비스 API
 _HOSP_API_URL = "https://apis.data.go.kr/B551182/hospInfoServicev2/getHospBasisList"
-_HOSP_API_KEY = "72c6779aea30770c96a2620ae1c96d6acb8ab33c5c1fdb404b91ac8864927e0e"
 
 # 시도명 → sidoCd 매핑 (건강보험심사평가원 코드 기준)
 _SIDO_CODE: dict[str, str] = {
@@ -122,19 +117,19 @@ def _bm25_query(search_query: str) -> dict[str, Any]:
 def _build_retriever() -> ElasticsearchRetriever:
     """Elasticsearch 클라이언트를 생성한 뒤 ElasticsearchRetriever에 주입합니다."""
     es_client = Elasticsearch(
-        _ES_URL,
-        basic_auth=(_ES_USER, _ES_PASSWORD),
+        settings.ES_URL,
+        basic_auth=(settings.ES_USER, settings.ES_PASSWORD),
         verify_certs=False,
     )
     return ElasticsearchRetriever(
-        index_name=_INDEX_NAME,
+        index_name=settings.ES_INDEX_NAME,
         body_func=_bm25_query,
         content_field=_CONTENT_FIELD,
         client=es_client,
     )
 
 
-# 전역 싱글턴 인스턴스 (카단 황유)
+# 전역 싱글턴 인스턴스
 _retriever: ElasticsearchRetriever | None = None
 
 
@@ -142,6 +137,12 @@ def _get_retriever() -> ElasticsearchRetriever:
     global _retriever
     if _retriever is None:
         _retriever = _build_retriever()
+    else:
+        # 연결 상태 확인 후 실패 시 재초기화
+        try:
+            _retriever.client.info()
+        except Exception:
+            _retriever = _build_retriever()
     return _retriever
 
 
@@ -170,18 +171,104 @@ def search_symptoms(symptoms: str) -> str:
 
 # 영어 약이름 → 한국어 검색어 매핑 (e약은요 API는 한국어 제품명 기반)
 _DRUG_NAME_ALIASES: dict[str, str] = {
+    # 진통·해열제
     "aspirin": "아스피린",
     "acetaminophen": "아세트아미노펜",
+    "paracetamol": "아세트아미노펜",
     "tylenol": "타이레놀",
     "ibuprofen": "이부프로펜",
     "advil": "이부프로펜",
+    "motrin": "이부프로펜",
+    "naproxen": "나프록센",
+    "diclofenac": "디클로페낙",
+    "celecoxib": "셀레콕시브",
+    "tramadol": "트라마돌",
+    # 항생제
     "amoxicillin": "아목시실린",
+    "augmentin": "아목시실린",
+    "azithromycin": "아지트로마이신",
+    "zithromax": "아지트로마이신",
+    "ciprofloxacin": "시프로플록사신",
+    "doxycycline": "독시사이클린",
+    "clarithromycin": "클래리스로마이신",
+    "cephalexin": "세파렉신",
+    "levofloxacin": "레보플록사신",
+    "metronidazole": "메트로니다졸",
+    # 당뇨약
     "metformin": "메트포르민",
+    "glucophage": "메트포르민",
+    "glipizide": "글리피자이드",
+    "sitagliptin": "시타글립틴",
+    "januvia": "시타글립틴",
+    "empagliflozin": "엠파글리플로진",
+    "jardiance": "엠파글리플로진",
+    "insulin": "인슐린",
+    # 심혈관
     "warfarin": "와파린",
+    "coumadin": "와파린",
     "amlodipine": "암로디핀",
+    "norvasc": "암로디핀",
     "atorvastatin": "아토르바스타틴",
-    "omeprazole": "오메프라졸",
+    "lipitor": "아토르바스타틴",
+    "rosuvastatin": "로수바스타틴",
+    "crestor": "로수바스타틴",
     "losartan": "로사르탄",
+    "cozaar": "로사르탄",
+    "valsartan": "발사르탄",
+    "lisinopril": "리시노프릴",
+    "carvedilol": "카르베딜롤",
+    "bisoprolol": "비소프롤롤",
+    "clopidogrel": "클로피도그렐",
+    "plavix": "클로피도그렐",
+    "furosemide": "푸로세미드",
+    "lasix": "푸로세미드",
+    # 위장약
+    "omeprazole": "오메프라졸",
+    "esomeprazole": "에소메프라졸",
+    "nexium": "에소메프라졸",
+    "pantoprazole": "판토프라졸",
+    "lansoprazole": "란소프라졸",
+    "ranitidine": "라니티딘",
+    "domperidone": "돔페리돈",
+    "metoclopramide": "메토클로프라미드",
+    # 호흡기·알레르기
+    "cetirizine": "세티리진",
+    "zyrtec": "세티리진",
+    "loratadine": "로라타딘",
+    "claritin": "로라타딘",
+    "fexofenadine": "펙소페나딘",
+    "allegra": "펙소페나딘",
+    "montelukast": "몬테루카스트",
+    "singulair": "몬테루카스트",
+    "salbutamol": "살부타몰",
+    "albuterol": "살부타몰",
+    "fluticasone": "플루티카손",
+    # 정신·신경계
+    "alprazolam": "알프라졸람",
+    "xanax": "알프라졸람",
+    "diazepam": "디아제팜",
+    "valium": "디아제팜",
+    "zolpidem": "졸피뎀",
+    "ambien": "졸피뎀",
+    "sertraline": "설트랄린",
+    "zoloft": "설트랄린",
+    "fluoxetine": "플루옥세틴",
+    "prozac": "플루옥세틴",
+    "escitalopram": "에스시탈로프람",
+    "lexapro": "에스시탈로프람",
+    "pregabalin": "프레가발린",
+    "lyrica": "프레가발린",
+    "gabapentin": "가바펜틴",
+    # 기타
+    "dexamethasone": "덱사메타손",
+    "prednisolone": "프레드니솔론",
+    "levothyroxine": "레보티록신",
+    "synthroid": "레보티록신",
+    "allopurinol": "알로퓨리놀",
+    "sildenafil": "실데나필",
+    "viagra": "실데나필",
+    "tadalafil": "타다라필",
+    "cialis": "타다라필",
 }
 
 
@@ -201,7 +288,7 @@ def get_medication_info(medication_name: str) -> str:
         resp = httpx.get(
             _DRUG_API_URL,
             params={
-                "serviceKey": _DRUG_API_KEY,
+                "serviceKey": settings.MFDS_API_KEY,
                 "itemName": search_name,
                 "type": "json",
                 "numOfRows": 3,
@@ -271,13 +358,53 @@ _EMERGENCY_KEYWORDS: dict[str, list[str]] = {
     "일반 진료 권고": [],
 }
 
+# 증상 조합 → 상향 분류 규칙
+# 각 항목: (업그레이드 목표 레벨, [(그룹1 키워드), (그룹2 키워드), ...])
+# 그룹 내 키워드 중 하나 이상이 포함되면 그룹 매칭으로 판단
+_COMBINATION_RULES: list[tuple[str, list[list[str]]]] = [
+    # 뇌수막염: 고열 + 심한 두통 + 목 뻣뻣함/구토
+    (
+        "즉시 119 신고 (생명위협)",
+        [["고열", "38.5도", "39도", "40도"], ["심한 두통", "두통"], ["목 뻣뻣", "구토", "빛 민감"]],
+    ),
+    # 심근경색: 흉통 + 왼팔/턱 방사통 또는 식은땀
+    (
+        "즉시 119 신고 (생명위협)",
+        [["흉통", "가슴 통증", "가슴통증"], ["왼팔", "왼쪽 팔", "턱 통증", "턱통증", "식은땀", "구역질"]],
+    ),
+    # 패혈증 의심: 고열 + 빠른 맥박 + 의식 저하 또는 저혈압
+    (
+        "즉시 119 신고 (생명위협)",
+        [["고열", "38.5도", "39도"], ["빠른 맥박", "심계항진", "두근거림"], ["의식 저하", "저혈압", "어지러움"]],
+    ),
+    # 폐색전증: 갑작스러운 호흡곤란 + 흉통 + 다리 부종
+    (
+        "즉시 119 신고 (생명위협)",
+        [["호흡곤란", "숨 차"], ["흉통", "가슴 통증"], ["다리 부음", "다리 붓", "종아리 통증"]],
+    ),
+    # 맹장염: 오른쪽 하복부 통증 + 발열 + 구토
+    (
+        "응급실 방문 권고",
+        [["오른쪽 아랫배", "오른쪽 하복부", "맹장"], ["발열", "열이", "열나"], ["구토", "메스꺼움"]],
+    ),
+]
+
+
+def _check_combination_rules(symptoms: str) -> str | None:
+    """증상 조합 규칙을 검사하여 업그레이드된 레벨을 반환합니다. 없으면 None."""
+    for target_level, groups in _COMBINATION_RULES:
+        if all(any(kw in symptoms for kw in group) for group in groups):
+            return target_level
+    return None
+
 
 @tool
 def classify_emergency(symptoms: str) -> str:
-    """증상을 설명하면 응급 여부를 판단하고 적절한 대응 방법을 안내합니다."""
+    """증상을 설명하면 응급 여부를 판단하고 적절한 대응 방법을 안내합니다. 단일 증상뿐만 아니라 복합 증상 조합도 분석합니다."""
     matched_level: str | None = None
     matched_keywords: list[str] = []
 
+    # 1단계: 개별 키워드 매칭
     for level, keywords in _EMERGENCY_KEYWORDS.items():
         for kw in keywords:
             if kw in symptoms:
@@ -285,19 +412,33 @@ def classify_emergency(symptoms: str) -> str:
                     matched_level = level
                 matched_keywords.append(kw)
 
+    # 2단계: 조합 규칙으로 상향 분류 (더 높은 위험 레벨로 업그레이드)
+    combination_level = _check_combination_rules(symptoms)
+    combination_note = ""
+    if combination_level:
+        if matched_level != "즉시 119 신고 (생명위협)":
+            if combination_level == "즉시 119 신고 (생명위협)":
+                combination_note = "\n[복합 증상 분석] 여러 증상의 조합이 중증 상태를 시사합니다."
+                matched_level = combination_level
+            elif combination_level == "응급실 방문 권고" and matched_level is None:
+                combination_note = "\n[복합 증상 분석] 증상 조합이 응급 상황을 시사합니다."
+                matched_level = combination_level
+
     if matched_level is None or matched_level == "일반 진료 권고":
         return (
             "■ 응급 분류 결과: 일반 진료 권고\n\n"
             "현재 증상은 즉각적인 응급처치가 필요한 상태로 판단되지 않습니다.\n"
             "가까운 의원이나 병원에서 진료를 받으시길 권장합니다.\n\n"
-            "⚠️ 증상이 갑자기 악화되거나 호흡곤란, 의식저하, 심한 흉통이 발생하면 즉시 119에 신고하세요."
+            "⚠️ 증상이 갑자기 악화되거나 호흡곤란, 의식저하, 심한 흉통이 발생하면 즉시 119에 신고하세요.\n"
+            "※ AI 판단은 참고용입니다. 증상이 의심스러우면 즉시 119에 신고하거나 응급실을 방문하세요."
         )
 
-    lines = [f"■ 응급 분류 결과: {matched_level}\n"]
+    lines = [f"■ 응급 분류 결과: {matched_level}{combination_note}\n"]
 
     if matched_level == "즉시 119 신고 (생명위협)":
-        lines.append("🚨 지금 즉시 119에 전화하세요!")
-        lines.append(f"감지된 증상 키워드: {', '.join(matched_keywords)}\n")
+        lines.append("지금 즉시 119에 전화하세요!")
+        if matched_keywords:
+            lines.append(f"감지된 증상 키워드: {', '.join(dict.fromkeys(matched_keywords))}\n")
         lines.append("■ 즉시 취해야 할 조치:")
         lines.append("1. 119에 신고하고 환자 위치, 증상을 정확히 전달하세요.")
         lines.append("2. 환자를 안전한 곳에 눕히고 기도를 확보하세요.")
@@ -305,25 +446,26 @@ def classify_emergency(symptoms: str) -> str:
         lines.append("4. AED(자동심장충격기)가 근처에 있다면 사용하세요.")
         lines.append("5. 구급대가 도착할 때까지 환자 곁을 지키세요.")
     else:
-        lines.append("🏥 가능한 빨리 응급실을 방문하세요.")
-        lines.append(f"감지된 증상 키워드: {', '.join(matched_keywords)}\n")
+        lines.append("가능한 빨리 응급실을 방문하세요.")
+        if matched_keywords:
+            lines.append(f"감지된 증상 키워드: {', '.join(dict.fromkeys(matched_keywords))}\n")
         lines.append("■ 응급실 방문 전 주의사항:")
         lines.append("1. 혼자 운전하지 말고 보호자와 함께 이동하세요.")
         lines.append("2. 복용 중인 약물 목록을 지참하세요.")
         lines.append("3. 증상 발생 시각과 경과를 기록해 두세요.")
         lines.append("4. 증상이 급격히 악화되면 즉시 119에 신고하세요.")
 
-    lines.append("\n⚠️ 이 정보는 참고용이며 전문 의료진의 판단을 대체하지 않습니다.")
+    lines.append("\n※ AI 판단은 참고용입니다. 증상이 의심스러우면 즉시 119에 신고하거나 응급실을 방문하세요.")
     return "\n".join(lines)
 
 
-def _fetch_drug_interaction_text(drug_name: str) -> str | None:
-    """e약은요 API에서 약물의 상호작용(intrcQesitm) 필드를 조회합니다."""
+def _get_ingredient_name(drug_name: str) -> str | None:
+    """e약은요 API에서 약물의 성분명(주성분)을 조회합니다."""
     try:
         resp = httpx.get(
             _DRUG_API_URL,
             params={
-                "serviceKey": _DRUG_API_KEY,
+                "serviceKey": settings.MFDS_API_KEY,
                 "itemName": drug_name,
                 "type": "json",
                 "numOfRows": 1,
@@ -346,39 +488,113 @@ def _fetch_drug_interaction_text(drug_name: str) -> str | None:
     if not items:
         return None
 
-    return items[0].get("intrcQesitm") or None
+    # 성분명 필드: 없으면 제품명으로 fallback
+    return items[0].get("ingrdntName") or items[0].get("itemName") or None
+
+
+def _fetch_dur_taboo(ingredient: str) -> list[dict[str, str]]:
+    """
+    DUR 병용금기 API에서 특정 성분의 금기 조합 목록을 조회합니다.
+    반환값: [{"ingredient": "성분명", "reason": "금기 사유"}, ...]
+    """
+    try:
+        resp = httpx.get(
+            _DUR_API_URL,
+            params={
+                "serviceKey": settings.MFDS_API_KEY,
+                "typeName": ingredient,
+                "pageNo": 1,
+                "numOfRows": 10,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return []
+
+    items: list[Any] = (
+        data.get("body", {}).get("items", [])
+        or data.get("response", {}).get("body", {}).get("items", [])
+        or []
+    )
+    if isinstance(items, dict):
+        items = [items]
+
+    results: list[dict[str, str]] = []
+    for item in items:
+        partner = item.get("MIXTURE_INGR_NAME") or item.get("mixIngrdntName") or ""
+        reason = item.get("PROHBT_CONTENT") or item.get("prohbtContent") or ""
+        if partner:
+            results.append({"ingredient": partner.strip(), "reason": _strip_html(reason)})
+    return results
 
 
 @tool
 def check_drug_interaction(drug1: str, drug2: str) -> str:
-    """두 약물 이름을 입력하면 식품의약품안전처 데이터를 기반으로 병용 시 상호작용·주의사항을 조회합니다."""
-    intr1 = _fetch_drug_interaction_text(drug1)
-    intr2 = _fetch_drug_interaction_text(drug2)
+    """두 약물 이름을 입력하면 식품의약품안전처 DUR(의약품 안전사용 서비스) 데이터를 기반으로 병용금기 여부와 주의사항을 조회합니다."""
+    # 영어 약이름이면 한국어로 변환
+    name1 = _DRUG_NAME_ALIASES.get(drug1.lower().strip(), drug1.strip())
+    name2 = _DRUG_NAME_ALIASES.get(drug2.lower().strip(), drug2.strip())
 
-    if intr1 is None and intr2 is None:
-        return (
-            f"'{drug1}' 및 '{drug2}'에 대한 상호작용 정보를 찾을 수 없습니다.\n"
-            "약물명이 정확한지 확인하거나 약사·의사에게 직접 문의하세요."
-        )
+    # 1단계: 성분명 조회
+    ingr1 = _get_ingredient_name(name1) or name1
+    ingr2 = _get_ingredient_name(name2) or name2
 
-    lines: list[str] = [f"■ '{drug1}' + '{drug2}' 병용 상호작용 정보\n"]
+    # 2단계: DUR 병용금기 조회 (양방향)
+    taboo1 = _fetch_dur_taboo(ingr1)
+    taboo2 = _fetch_dur_taboo(ingr2)
 
-    if intr1:
-        lines.append(f"[{drug1}의 상호작용 주의 약물]")
-        lines.append(intr1)
-        # drug2가 intr1 내용에 언급되는지 확인
-        if drug2 in intr1:
-            lines.append(f"\n⚠️ '{drug2}'이(가) '{drug1}'의 상호작용 주의 목록에 포함되어 있습니다!")
+    lines: list[str] = [f"■ '{drug1}' + '{drug2}' DUR 병용금기 조회 결과\n"]
+    found = False
+
+    # drug1 성분 기준으로 drug2 성분이 금기 목록에 있는지 확인
+    matched_from_1 = [
+        t for t in taboo1
+        if name2.lower() in t["ingredient"].lower() or ingr2.lower() in t["ingredient"].lower()
+    ]
+    matched_from_2 = [
+        t for t in taboo2
+        if name1.lower() in t["ingredient"].lower() or ingr1.lower() in t["ingredient"].lower()
+    ]
+
+    if matched_from_1:
+        found = True
+        lines.append(f"[{drug1}({ingr1}) 기준 금기 확인]")
+        for t in matched_from_1:
+            lines.append(f"  - 금기 성분: {t['ingredient']}")
+            if t["reason"]:
+                lines.append(f"    사유: {t['reason']}")
         lines.append("")
 
-    if intr2:
-        lines.append(f"[{drug2}의 상호작용 주의 약물]")
-        lines.append(intr2)
-        if drug1 in intr2:
-            lines.append(f"\n⚠️ '{drug1}'이(가) '{drug2}'의 상호작용 주의 목록에 포함되어 있습니다!")
+    if matched_from_2:
+        found = True
+        lines.append(f"[{drug2}({ingr2}) 기준 금기 확인]")
+        for t in matched_from_2:
+            lines.append(f"  - 금기 성분: {t['ingredient']}")
+            if t["reason"]:
+                lines.append(f"    사유: {t['reason']}")
         lines.append("")
 
-    lines.append("※ 병용 복용 전 반드시 의사 또는 약사와 상의하세요.")
+    if not found:
+        # DUR에서 직접 매칭 실패 → 전체 금기 목록 안내
+        if taboo1 or taboo2:
+            lines.append("두 약물 간 직접적인 DUR 병용금기는 확인되지 않았습니다.")
+            if taboo1:
+                partners1 = ", ".join({t["ingredient"] for t in taboo1[:5]})
+                lines.append(f"  ※ {drug1}({ingr1})의 주요 금기 성분: {partners1}")
+            if taboo2:
+                partners2 = ", ".join({t["ingredient"] for t in taboo2[:5]})
+                lines.append(f"  ※ {drug2}({ingr2})의 주요 금기 성분: {partners2}")
+        else:
+            lines.append(
+                "DUR 데이터에서 두 약물의 병용금기 정보를 찾을 수 없습니다.\n"
+                "약물명이 정확한지 확인하거나 약사·의사에게 직접 문의하세요."
+            )
+    else:
+        lines.insert(1, "⚠️ 병용금기 성분이 확인되었습니다. 반드시 의사·약사와 상의하세요.\n")
+
+    lines.append("\n※ 이 정보는 식품의약품안전처 DUR 데이터 기반이며, 최종 판단은 전문 의료진에게 문의하세요.")
     return "\n".join(lines).strip()
 
 
@@ -573,7 +789,7 @@ def find_nearby_hospitals(location: str, specialty: str = "일반") -> str:
     dept_cd = _DEPT_CODE.get(specialty)
 
     params: dict[str, Any] = {
-        "serviceKey": _HOSP_API_KEY,
+        "serviceKey": settings.HIRA_API_KEY,
         "pageNo": "1",
         "numOfRows": "5",
     }
@@ -625,18 +841,44 @@ def find_nearby_hospitals(location: str, specialty: str = "일반") -> str:
         "",
     ]
     for i, item in enumerate(items, 1):
-        name    = item.findtext("yadmNm", "") 
-        cl_name = item.findtext("clCdNm", "")
-        addr    = item.findtext("addr", "")
-        tel     = item.findtext("telno", "")
-        dr_cnt  = item.findtext("drTotCnt", "")
-        url     = item.findtext("hospUrl", "")
-        lines.append(f"{i}. {name} [{cl_name}]")
+        name     = item.findtext("yadmNm", "")
+        cl_name  = item.findtext("clCdNm", "")
+        addr     = item.findtext("addr", "")
+        tel      = item.findtext("telno", "")
+        dr_cnt   = item.findtext("drTotCnt", "")
+        url      = item.findtext("hospUrl", "")
+        # 응급실 여부 (emclsName: 응급의료기관 종류명)
+        emcls    = item.findtext("emclsName", "")
+        # 진료 요일 (dgidIdName: 진료과목 및 운영일 정보가 있는 경우)
+        # HIRA API 필드: 평일/토요일/일요일/공휴일 진료 여부
+        wkday    = item.findtext("wkday", "")   # 평일 운영 시간
+        satday   = item.findtext("sat", "")     # 토요일 운영 시간
+        sunHoli  = item.findtext("sun", "")     # 일요일 운영 시간
+        holiday  = item.findtext("holi", "")    # 공휴일 운영 시간
+        lunchYn  = item.findtext("lunchYn", "") # 점심시간 진료 여부 (Y/N)
+
+        lines.append(f"{i}. {name} [{cl_name}]" + (f" [응급의료기관: {emcls}]" if emcls else ""))
         lines.append(f"   주소: {addr}")
         if tel:
             lines.append(f"   전화: {tel}")
         if dr_cnt and dr_cnt != "0":
             lines.append(f"   의사 수: {dr_cnt}명")
+
+        # 진료시간 정리
+        hours_info: list[str] = []
+        if wkday:
+            hours_info.append(f"평일 {wkday}")
+        if satday:
+            hours_info.append(f"토 {satday}")
+        if sunHoli:
+            hours_info.append(f"일 {sunHoli}")
+        if holiday:
+            hours_info.append(f"공휴일 {holiday}")
+        if hours_info:
+            lines.append(f"   진료시간: {' / '.join(hours_info)}")
+        if lunchYn == "Y":
+            lines.append("   점심시간 진료: 가능")
+
         if url:
             lines.append(f"   홈페이지: {url}")
         lines.append("")
