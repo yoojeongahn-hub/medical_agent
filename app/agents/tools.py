@@ -168,15 +168,41 @@ def search_symptoms(symptoms: str) -> str:
 
     return "\n\n".join(results)
 
+# 영어 약이름 → 한국어 검색어 매핑 (e약은요 API는 한국어 제품명 기반)
+_DRUG_NAME_ALIASES: dict[str, str] = {
+    "aspirin": "아스피린",
+    "acetaminophen": "아세트아미노펜",
+    "tylenol": "타이레놀",
+    "ibuprofen": "이부프로펜",
+    "advil": "이부프로펜",
+    "amoxicillin": "아목시실린",
+    "metformin": "메트포르민",
+    "warfarin": "와파린",
+    "amlodipine": "암로디핀",
+    "atorvastatin": "아토르바스타틴",
+    "omeprazole": "오메프라졸",
+    "losartan": "로사르탄",
+}
+
+
+def _strip_html(text: str) -> str:
+    """API 응답에서 HTML 태그를 제거합니다."""
+    import re
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+
 @tool
 def get_medication_info(medication_name: str) -> str:
-    """약물 이름을 받아 식품의약품안전승인러비스(e약은요) API에서 효능, 사용법, 주의사항, 부작용, 보관법 등을 조회합니다."""
+    """약물 이름을 받아 식품의약품안전처(e약은요) API에서 효능, 사용법, 주의사항, 부작용, 보관법 등을 조회합니다."""
+    # 영어 약이름이면 한국어로 변환
+    search_name = _DRUG_NAME_ALIASES.get(medication_name.lower().strip(), medication_name.strip())
+
     try:
         resp = httpx.get(
             _DRUG_API_URL,
             params={
                 "serviceKey": _DRUG_API_KEY,
-                "itemName": medication_name,
+                "itemName": search_name,
                 "type": "json",
                 "numOfRows": 3,
                 "pageNo": 1,
@@ -205,9 +231,9 @@ def get_medication_info(medication_name: str) -> str:
 
     lines: list[str] = []
     for item in items:
-        name = item.get("itemName", medication_name)
+        name = item.get("itemName", search_name)
         entp = item.get("entpName", "")
-        lines.append(f"■ 제품명: {name}" + (f" ({entp})⎛" if entp else ""))
+        lines.append(f"■ 제품명: {name}" + (f" ({entp})" if entp else ""))
 
         field_map = {
             "efcyQesitm": "효능",
@@ -221,7 +247,7 @@ def get_medication_info(medication_name: str) -> str:
         for field, label in field_map.items():
             value = item.get(field)
             if value:
-                lines.append(f"  [{label}] {value}")
+                lines.append(f"  [{label}] {_strip_html(value)}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -291,57 +317,68 @@ def classify_emergency(symptoms: str) -> str:
     return "\n".join(lines)
 
 
-@tool
-def check_drug_interaction(drug1: str, drug2: str) -> str:
-    """두 약물의 이름을 받아 식품의약품안전처 DUR 병용금기 정보를 조회합니다."""
-    import xml.etree.ElementTree as ET
-
+def _fetch_drug_interaction_text(drug_name: str) -> str | None:
+    """e약은요 API에서 약물의 상호작용(intrcQesitm) 필드를 조회합니다."""
     try:
         resp = httpx.get(
-            _DUR_API_URL,
+            _DRUG_API_URL,
             params={
-                "serviceKey": _DUR_API_KEY,
-                "typeName": drug1,
-                "mixture": drug2,
-                "type": "xml",
-                "numOfRows": 5,
+                "serviceKey": _DRUG_API_KEY,
+                "itemName": drug_name,
+                "type": "json",
+                "numOfRows": 1,
                 "pageNo": 1,
             },
             timeout=10,
         )
         resp.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        return f"DUR API 호출 실패 (HTTP {e.response.status_code}): {e.response.text[:200]}"
-    except httpx.RequestError as e:
-        return f"DUR API 네트워크 오류: {e}"
+        data = resp.json()
+    except Exception:
+        return None
 
-    try:
-        root = ET.fromstring(resp.content)
-    except ET.ParseError as e:
-        return f"DUR API 응답 파싱 오류: {e}"
-
-    result_code = root.findtext(".//resultCode", "")
-    if result_code != "00":
-        result_msg = root.findtext(".//resultMsg", "")
-        return f"DUR API 오류 ({result_code}): {result_msg}"
-
-    items = root.findall(".//item")
+    items: list[Any] = (
+        data.get("body", {}).get("items", [])
+        or data.get("response", {}).get("body", {}).get("items", [])
+        or []
+    )
+    if isinstance(items, dict):
+        items = [items]
     if not items:
-        return f"'{drug1}'과 '{drug2}'의 병용금기 정보가 없습니다. (병용 가능하거나 DUR 등재 정보 없음)"
+        return None
 
-    lines: list[str] = [f"■ '{drug1}' + '{drug2}' 병용금기 정보\n"]
-    for i, item in enumerate(items, 1):
-        a_name = item.findtext("MIXTURE_DUR_DE_NM", "") or item.findtext("TYPNM_KOR", drug1)
-        b_name = item.findtext("MIX_DUR_DE_NM", "") or item.findtext("MIXTURNM_KOR", drug2)
-        reason = item.findtext("PROHBT_CONTENT", "") or item.findtext("REMARK", "")
-        grade = item.findtext("GRADE", "")
-        lines.append(f"{i}. {a_name} + {b_name}")
-        if grade:
-            lines.append(f"   등급: {grade}")
-        if reason:
-            lines.append(f"   사유: {reason}")
+    return items[0].get("intrcQesitm") or None
+
+
+@tool
+def check_drug_interaction(drug1: str, drug2: str) -> str:
+    """두 약물 이름을 입력하면 식품의약품안전처 데이터를 기반으로 병용 시 상호작용·주의사항을 조회합니다."""
+    intr1 = _fetch_drug_interaction_text(drug1)
+    intr2 = _fetch_drug_interaction_text(drug2)
+
+    if intr1 is None and intr2 is None:
+        return (
+            f"'{drug1}' 및 '{drug2}'에 대한 상호작용 정보를 찾을 수 없습니다.\n"
+            "약물명이 정확한지 확인하거나 약사·의사에게 직접 문의하세요."
+        )
+
+    lines: list[str] = [f"■ '{drug1}' + '{drug2}' 병용 상호작용 정보\n"]
+
+    if intr1:
+        lines.append(f"[{drug1}의 상호작용 주의 약물]")
+        lines.append(intr1)
+        # drug2가 intr1 내용에 언급되는지 확인
+        if drug2 in intr1:
+            lines.append(f"\n⚠️ '{drug2}'이(가) '{drug1}'의 상호작용 주의 목록에 포함되어 있습니다!")
         lines.append("")
 
+    if intr2:
+        lines.append(f"[{drug2}의 상호작용 주의 약물]")
+        lines.append(intr2)
+        if drug1 in intr2:
+            lines.append(f"\n⚠️ '{drug1}'이(가) '{drug2}'의 상호작용 주의 목록에 포함되어 있습니다!")
+        lines.append("")
+
+    lines.append("※ 병용 복용 전 반드시 의사 또는 약사와 상의하세요.")
     return "\n".join(lines).strip()
 
 
@@ -413,6 +450,51 @@ _FIRST_AID_GUIDES: dict[str, str] = {
         "4. 의식이 있으면 시원한 물이나 이온음료를 마시게 하세요.\n"
         "5. 의식이 없으면 음료 금지, CPR 준비 후 구급대 기다리세요."
     ),
+    "익사": (
+        "■ 익사(물에 빠짐) 응급처치\n"
+        "1. 즉시 119에 신고하세요.\n"
+        "2. 구조자가 직접 뛰어들지 말고, 튜브·밧줄·막대 등을 이용해 구조하세요.\n"
+        "3. 물 밖으로 꺼낸 후 의식·호흡을 확인하세요.\n"
+        "4. 호흡이 없으면 즉시 CPR(심폐소생술)을 시작하세요.\n"
+        "5. 물을 빼내려고 거꾸로 들거나 배를 누르지 마세요 (위 내용물 역류 위험).\n"
+        "6. 의식이 있어도 저체온증 위험이 있으니 따뜻하게 하고 병원 방문 필수."
+    ),
+    "뇌졸중": (
+        "■ 뇌졸중 응급처치 (FAST 확인법)\n"
+        "F (Face): 얼굴 한쪽이 처지거나 마비되는지 확인하세요.\n"
+        "A (Arms): 양팔을 들었을 때 한쪽이 처지는지 확인하세요.\n"
+        "S (Speech): 말이 어눌하거나 이해하지 못하는지 확인하세요.\n"
+        "T (Time): 위 증상이 하나라도 있으면 즉시 119에 신고하세요!\n\n"
+        "1. 즉시 119에 신고하고 발생 시각을 기록하세요 (치료 골든타임: 4.5시간).\n"
+        "2. 환자를 눕히고 머리를 약간 올려두세요.\n"
+        "3. 음식·물·약 복용 금지 (삼킴 장애 위험).\n"
+        "4. 의식을 잃으면 옆으로 눕혀 기도를 확보하세요.\n"
+        "5. 증상이 잠깐 좋아져도 반드시 응급실로 이송하세요."
+    ),
+    "저혈당": (
+        "■ 저혈당 응급처치\n"
+        "저혈당 증상: 식은땀, 떨림, 어지러움, 두근거림, 의식 흐림\n\n"
+        "의식이 있는 경우:\n"
+        "1. 즉시 빠르게 흡수되는 당분을 섭취하세요.\n"
+        "   - 과일주스 150mL, 사탕 3~4개, 각설탕 2~3개, 꿀 1큰술\n"
+        "2. 15분 후 증상이 개선되지 않으면 한 번 더 반복하세요.\n"
+        "3. 증상 회복 후 빵·밥 등 복합당질을 추가 섭취하세요.\n\n"
+        "의식이 없는 경우:\n"
+        "1. 입으로 음식을 주지 마세요 (질식 위험).\n"
+        "2. 즉시 119에 신고하세요.\n"
+        "3. 글루카곤 주사가 있으면 허벅지나 상완에 투여하세요."
+    ),
+    "눈 이물질": (
+        "■ 눈 이물질 응급처치\n"
+        "일반 이물질(먼지, 속눈썹 등):\n"
+        "1. 눈을 비비지 마세요 (각막 손상 위험).\n"
+        "2. 깨끗한 물이나 생리식염수로 눈을 충분히 씻어내세요.\n"
+        "3. 세척 후에도 이물감이 있으면 안과를 방문하세요.\n\n"
+        "화학물질(락스, 세정제 등):\n"
+        "1. 즉시 흐르는 물로 15~20분 이상 눈을 씻으세요 (눈꺼풀을 강제로 열어서).\n"
+        "2. 콘택트렌즈 착용 시 렌즈를 즉시 제거하고 세척하세요.\n"
+        "3. 세척 후 즉시 응급실을 방문하세요."
+    ),
 }
 
 
@@ -427,13 +509,17 @@ def get_first_aid_guide(situation: str) -> str:
     # 부분 매칭
     aliases: dict[str, str] = {
         "cpr": "심폐소생술", "심장": "심폐소생술", "심정지": "심폐소생술",
-        "불": "화상", "뜨거운": "화상",
+        "불": "화상", "뜨거운": "화상", "데": "화상",
         "뼈": "골절", "부러": "골절",
         "피": "출혈", "지혈": "출혈",
-        "숨막": "질식", "목막": "질식", "이물질": "질식",
-        "약먹": "독극물", "농약": "독극물", "삼킴": "독극물",
+        "숨막": "질식", "목막": "질식",
+        "약먹": "독극물", "농약": "독극물", "삼킴": "독극물", "먹었": "독극물",
         "추위": "저체온증", "동상": "저체온증", "얼어": "저체온증",
         "더위": "열사병", "일사병": "열사병", "폭염": "열사병",
+        "물에 빠": "익사", "빠졌": "익사", "溺水": "익사",
+        "뇌졸": "뇌졸중", "뇌출혈": "뇌졸중", "뇌경색": "뇌졸중", "fast": "뇌졸중",
+        "저혈당": "저혈당", "혈당 낮": "저혈당", "당 떨어": "저혈당",
+        "눈에 이물": "눈 이물질", "눈에 뭐가": "눈 이물질", "눈 세척": "눈 이물질",
     }
     situation_lower = situation.lower()
     for alias, key in aliases.items():
@@ -448,14 +534,28 @@ def get_first_aid_guide(situation: str) -> str:
     )
 
 
+def _is_korean_text(text: str) -> bool:
+    """문자열에 한글이 포함되어 있는지 확인합니다."""
+    return any("\uAC00" <= ch <= "\uD7A3" or "\u1100" <= ch <= "\u11FF" for ch in text)
+
+
 @tool
 def find_nearby_hospitals(location: str, specialty: str = "일반") -> str:
     """
     지역명과 병원 종별(specialty)을 기반으로 건강보험심사평가원 병원정보서비스에서 병원 목록을 조회합니다.
     location: 시도명 (예: '서울', '부산', '경기') 또는 병원명 일부
     specialty: 병원 종별 (예: '의원', '종합병원', '한의원', '치과', '일반')
+    이 서비스는 대한민국 내 병원만 조회 가능합니다.
     """
     import xml.etree.ElementTree as ET
+
+    # 한글이 없는 입력(외국 지역명 등) 조기 차단
+    if not _is_korean_text(location):
+        return (
+            f"'{location}'은(는) 지원하지 않는 지역입니다.\n"
+            "이 서비스는 대한민국 내 병원 정보만 제공합니다.\n"
+            "지역명 예시: 서울, 부산, 경기, 대구, 인천, 광주, 대전, 울산, 제주"
+        )
 
     # location → sidoCd 변환 시도 (지역명이면 코드로, 아니면 yadmNm 검색)
     sido_cd = None
@@ -482,19 +582,27 @@ def find_nearby_hospitals(location: str, specialty: str = "일반") -> str:
     if yadm_nm:
         params["yadmNm"] = yadm_nm
     if dept_cd:
-        # 진료과목 코드가 있으면 dgsbjtCd 우선 사용
         params["dgsbjtCd"] = dept_cd
     elif cl_cd:
-        # 진료과목 미매핑 시 종별코드(clCd) 사용
         params["clCd"] = cl_cd
 
-    try:
-        resp = httpx.get(_HOSP_API_URL, params=params, timeout=15)
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        return f"병원 정보 API 호출 실패 (HTTP {e.response.status_code}): {e.response.text[:200]}"
-    except httpx.RequestError as e:
-        return f"병원 정보 API 네트워크 오류: {e}"
+    # 타임아웃 재시도 1회
+    last_error: str = ""
+    for attempt in range(2):
+        try:
+            resp = httpx.get(_HOSP_API_URL, params=params, timeout=15)
+            resp.raise_for_status()
+            last_error = ""
+            break
+        except httpx.HTTPStatusError as e:
+            return f"병원 정보 API 호출 실패 (HTTP {e.response.status_code}): {e.response.text[:200]}"
+        except httpx.TimeoutException:
+            last_error = "병원 정보 API 응답 시간 초과입니다. 잠시 후 다시 시도해 주세요."
+        except httpx.RequestError as e:
+            last_error = f"병원 정보 API 네트워크 오류: {e}"
+            break
+    if last_error:
+        return last_error
 
     try:
         root = ET.fromstring(resp.content)
