@@ -153,21 +153,37 @@ def _get_retriever() -> ElasticsearchRetriever:
 
 @tool
 def search_symptoms(symptoms: str) -> str:
-    """주어진 증상(쉼표로 구분)을 기반으로 Elasticsearch에서 관련 의료 정보를 검색합니다."""
+    """주어진 증상을 기반으로 의료 지식 베이스에서 관련 정보를 검색하고, 증상과 관련된 핵심 내용을 요약해 반환합니다."""
     retriever = _get_retriever()
     docs = retriever.invoke(symptoms)
     if not docs:
         return f"증상 '{symptoms}'에 대한 관련 의료 정보를 찾을 수 없습니다."
 
-    results: list[str] = []
+    raw_chunks: list[str] = []
     for i, doc in enumerate(docs, 1):
         source_spec = doc.metadata.get("_source", {}).get("source_spec", "unknown")
         creation_year = doc.metadata.get("_source", {}).get("creation_year", "")
         header = f"[{i}] 출처: {source_spec}" + (f" ({creation_year}년)" if creation_year and creation_year != "null" else "")
-        snippet = doc.page_content[:500].replace("\n", " ")
-        results.append(f"{header}\n{snippet}")
+        snippet = doc.page_content[:600].replace("\n", " ")
+        raw_chunks.append(f"{header}\n{snippet}")
 
-    return "\n\n".join(results)
+    raw_text = "\n\n".join(raw_chunks)
+
+    # LLM으로 증상과 관련된 핵심 정보만 추출·요약
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    llm = _get_llm()
+    system = (
+        "당신은 의료 정보 전문가입니다. 주어진 검색 결과에서 사용자의 증상과 직접 관련된 "
+        "핵심 의료 정보만 추출해 간결하게 요약하세요. "
+        "관련 없는 내용은 제외하고, 원인·특징적 증상·진단 단서·치료 방향·주의사항을 중심으로 정리하세요. "
+        "출처 정보는 마지막에 간략히 명시하세요."
+    )
+    response = llm.invoke([
+        SystemMessage(content=system),
+        HumanMessage(content=f"증상: {symptoms}\n\n검색 결과:\n{raw_text}"),
+    ])
+    return response.content.strip()
 
 # 영어 약이름 → 한국어 검색어 매핑 (e약은요 API는 한국어 제품명 기반)
 _DRUG_NAME_ALIASES: dict[str, str] = {
@@ -278,6 +294,16 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text).strip()
 
 
+def _get_llm():
+    """동기 ChatOpenAI 인스턴스를 반환합니다 (도구 내부 LLM 호출용)."""
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        model=settings.OPENAI_MODEL,
+        temperature=0,
+        api_key=settings.OPENAI_API_KEY,
+    )
+
+
 @tool
 def get_medication_info(medication_name: str) -> str:
     """약물 이름을 받아 식품의약품안전처(e약은요) API에서 효능, 사용법, 주의사항, 부작용, 보관법 등을 조회합니다."""
@@ -339,128 +365,84 @@ def get_medication_info(medication_name: str) -> str:
 
     return "\n".join(lines).strip()
 
-_EMERGENCY_KEYWORDS: dict[str, list[str]] = {
-    "즉시 119 신고 (생명위협)": [
-        "심정지", "심장마비", "호흡정지", "의식없음", "의식불명", "쓰러짐", "쓰러졌",
-        "뇌졸중", "뇌출혈", "뇌경색", "반신마비", "안면마비", "갑작스러운 마비",
-        "대량출혈", "지혈안됨", "토혈", "혈변 다량", "질식", "기도막힘",
-        "심한 흉통", "가슴을 쥐어짜는", "호흡곤란 심한", "청색증",
-        "아나필락시스", "전신 두드러기 호흡곤란", "고열 경련", "간질발작",
-    ],
-    "응급실 방문 권고": [
-        "고열", "38.5도 이상", "39도", "40도", "심한 두통", "갑작스러운 두통",
-        "심한 복통", "복통 지속", "혈뇨", "혈변", "토혈 소량",
-        "골절 의심", "뼈 부러짐", "심한 타박상", "관절 탈구",
-        "화상 넓은", "눈 화학물질", "독극물 섭취",
-        "어지러움 심한", "구토 지속", "설사 지속", "탈수",
-        "흉통", "심계항진", "두근거림 심한",
-    ],
-    "일반 진료 권고": [],
-}
-
-# 증상 조합 → 상향 분류 규칙
-# 각 항목: (업그레이드 목표 레벨, [(그룹1 키워드), (그룹2 키워드), ...])
-# 그룹 내 키워드 중 하나 이상이 포함되면 그룹 매칭으로 판단
-_COMBINATION_RULES: list[tuple[str, list[list[str]]]] = [
-    # 뇌수막염: 고열 + 심한 두통 + 목 뻣뻣함/구토
-    (
-        "즉시 119 신고 (생명위협)",
-        [["고열", "38.5도", "39도", "40도"], ["심한 두통", "두통"], ["목 뻣뻣", "구토", "빛 민감"]],
-    ),
-    # 심근경색: 흉통 + 왼팔/턱 방사통 또는 식은땀
-    (
-        "즉시 119 신고 (생명위협)",
-        [["흉통", "가슴 통증", "가슴통증"], ["왼팔", "왼쪽 팔", "턱 통증", "턱통증", "식은땀", "구역질"]],
-    ),
-    # 패혈증 의심: 고열 + 빠른 맥박 + 의식 저하 또는 저혈압
-    (
-        "즉시 119 신고 (생명위협)",
-        [["고열", "38.5도", "39도"], ["빠른 맥박", "심계항진", "두근거림"], ["의식 저하", "저혈압", "어지러움"]],
-    ),
-    # 폐색전증: 갑작스러운 호흡곤란 + 흉통 + 다리 부종
-    (
-        "즉시 119 신고 (생명위협)",
-        [["호흡곤란", "숨 차"], ["흉통", "가슴 통증"], ["다리 부음", "다리 붓", "종아리 통증"]],
-    ),
-    # 맹장염: 오른쪽 하복부 통증 + 발열 + 구토
-    (
-        "응급실 방문 권고",
-        [["오른쪽 아랫배", "오른쪽 하복부", "맹장"], ["발열", "열이", "열나"], ["구토", "메스꺼움"]],
-    ),
-]
-
-
-def _check_combination_rules(symptoms: str) -> str | None:
-    """증상 조합 규칙을 검사하여 업그레이드된 레벨을 반환합니다. 없으면 None."""
-    for target_level, groups in _COMBINATION_RULES:
-        if all(any(kw in symptoms for kw in group) for group in groups):
-            return target_level
-    return None
-
-
 @tool
 def classify_emergency(symptoms: str) -> str:
-    """증상을 설명하면 응급 여부를 판단하고 적절한 대응 방법을 안내합니다. 단일 증상뿐만 아니라 복합 증상 조합도 분석합니다."""
-    matched_level: str | None = None
-    matched_keywords: list[str] = []
+    """증상을 자연어로 설명하면 응급의학 기준으로 응급 여부를 판단하고 적절한 대응 방법을 안내합니다."""
+    from langchain_core.messages import HumanMessage, SystemMessage
 
-    # 1단계: 개별 키워드 매칭
-    for level, keywords in _EMERGENCY_KEYWORDS.items():
-        for kw in keywords:
-            if kw in symptoms:
-                if matched_level is None:
-                    matched_level = level
-                matched_keywords.append(kw)
+    system = """당신은 응급의학과 전문의입니다. 환자의 증상 설명을 듣고 응급도를 판단하세요.
 
-    # 2단계: 조합 규칙으로 상향 분류 (더 높은 위험 레벨로 업그레이드)
-    combination_level = _check_combination_rules(symptoms)
-    combination_note = ""
-    if combination_level:
-        if matched_level != "즉시 119 신고 (생명위협)":
-            if combination_level == "즉시 119 신고 (생명위협)":
-                combination_note = "\n[복합 증상 분석] 여러 증상의 조합이 중증 상태를 시사합니다."
-                matched_level = combination_level
-            elif combination_level == "응급실 방문 권고" and matched_level is None:
-                combination_note = "\n[복합 증상 분석] 증상 조합이 응급 상황을 시사합니다."
-                matched_level = combination_level
+분류 기준:
+- 즉시119: 생명에 위협적인 상황 (심정지, 호흡정지, 의식불명, 대량출혈, 뇌졸중 의심, 아나필락시스, 심한 흉통으로 쥐어짜는 느낌, 경련 등)
+- 응급실: 빠른 처치가 필요한 상황 (38.5도 이상 고열, 심한 복통, 골절 의심, 독극물 섭취, 흉통, 지속되는 구토·설사·어지러움 등)
+- 일반진료: 가까운 의원에서 진료 가능한 상황
 
-    if matched_level is None or matched_level == "일반 진료 권고":
-        return (
-            "■ 응급 분류 결과: 일반 진료 권고\n\n"
-            "현재 증상은 즉각적인 응급처치가 필요한 상태로 판단되지 않습니다.\n"
-            "가까운 의원이나 병원에서 진료를 받으시길 권장합니다.\n\n"
-            "⚠️ 증상이 갑자기 악화되거나 호흡곤란, 의식저하, 심한 흉통이 발생하면 즉시 119에 신고하세요.\n"
-            "※ AI 판단은 참고용입니다. 증상이 의심스러우면 즉시 119에 신고하거나 응급실을 방문하세요."
-        )
+다음 형식으로 정확히 답변하세요 (형식을 절대 바꾸지 마세요):
+분류: [즉시119/응급실/일반진료]
+판단근거: [증상에서 응급도를 판단한 구체적 이유 1~2문장]
+조치:
+1. [첫 번째 취해야 할 행동]
+2. [두 번째 취해야 할 행동]
+3. [세 번째 취해야 할 행동]"""
 
-    lines = [f"■ 응급 분류 결과: {matched_level}{combination_note}\n"]
+    llm = _get_llm()
+    response = llm.invoke([
+        SystemMessage(content=system),
+        HumanMessage(content=f"환자 증상: {symptoms}"),
+    ])
+    raw = response.content.strip()
 
-    if matched_level == "즉시 119 신고 (생명위협)":
-        lines.append("지금 즉시 119에 전화하세요!")
-        if matched_keywords:
-            lines.append(f"감지된 증상 키워드: {', '.join(dict.fromkeys(matched_keywords))}\n")
-        lines.append("■ 즉시 취해야 할 조치:")
-        lines.append("1. 119에 신고하고 환자 위치, 증상을 정확히 전달하세요.")
-        lines.append("2. 환자를 안전한 곳에 눕히고 기도를 확보하세요.")
-        lines.append("3. 심정지라면 즉시 CPR(심폐소생술)을 시작하세요.")
-        lines.append("4. AED(자동심장충격기)가 근처에 있다면 사용하세요.")
-        lines.append("5. 구급대가 도착할 때까지 환자 곁을 지키세요.")
+    # 응답 파싱
+    level = "일반진료"
+    reason = ""
+    action_lines: list[str] = []
+    in_actions = False
+
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("분류:"):
+            val = line.replace("분류:", "").strip()
+            if "즉시119" in val or "즉시 119" in val:
+                level = "즉시119"
+            elif "응급실" in val:
+                level = "응급실"
+        elif line.startswith("판단근거:"):
+            reason = line.replace("판단근거:", "").strip()
+        elif line.startswith("조치:"):
+            in_actions = True
+        elif in_actions and line:
+            action_lines.append(line)
+
+    # 출력 포맷
+    if level == "즉시119":
+        out = "■ 응급 분류 결과: 즉시 119 신고 (생명위협)\n\n"
+        out += "🚨 지금 즉시 119에 전화하세요!\n\n"
+        if reason:
+            out += f"판단 근거: {reason}\n\n"
+        if action_lines:
+            out += "■ 즉시 취해야 할 조치:\n"
+            out += "\n".join(action_lines)
+    elif level == "응급실":
+        out = "■ 응급 분류 결과: 응급실 방문 권고\n\n"
+        out += "가능한 빨리 응급실을 방문하세요.\n\n"
+        if reason:
+            out += f"판단 근거: {reason}\n\n"
+        if action_lines:
+            out += "■ 응급실 방문 전 주의사항:\n"
+            out += "\n".join(action_lines)
     else:
-        lines.append("가능한 빨리 응급실을 방문하세요.")
-        if matched_keywords:
-            lines.append(f"감지된 증상 키워드: {', '.join(dict.fromkeys(matched_keywords))}\n")
-        lines.append("■ 응급실 방문 전 주의사항:")
-        lines.append("1. 혼자 운전하지 말고 보호자와 함께 이동하세요.")
-        lines.append("2. 복용 중인 약물 목록을 지참하세요.")
-        lines.append("3. 증상 발생 시각과 경과를 기록해 두세요.")
-        lines.append("4. 증상이 급격히 악화되면 즉시 119에 신고하세요.")
+        out = "■ 응급 분류 결과: 일반 진료 권고\n\n"
+        out += "현재 증상은 즉각적인 응급처치가 필요한 상태로 판단되지 않습니다.\n"
+        out += "가까운 의원이나 병원에서 진료를 받으시길 권장합니다.\n"
+        if reason:
+            out += f"\n판단 근거: {reason}\n"
 
-    lines.append("\n※ AI 판단은 참고용입니다. 증상이 의심스러우면 즉시 119에 신고하거나 응급실을 방문하세요.")
-    return "\n".join(lines)
+    out += "\n\n※ AI 판단은 참고용입니다. 증상이 의심스러우면 즉시 119에 신고하거나 응급실을 방문하세요."
+    return out
 
 
-def _get_ingredient_name(drug_name: str) -> str | None:
-    """e약은요 API에서 약물의 성분명(주성분)을 조회합니다."""
+def _fetch_drug_interaction_info(drug_name: str) -> dict[str, str]:
+    """e약은요 API에서 약물의 상호작용(intrcQesitm) 및 주의사항 정보를 조회합니다."""
     try:
         resp = httpx.get(
             _DRUG_API_URL,
@@ -476,7 +458,7 @@ def _get_ingredient_name(drug_name: str) -> str | None:
         resp.raise_for_status()
         data = resp.json()
     except Exception:
-        return None
+        return {}
 
     items: list[Any] = (
         data.get("body", {}).get("items", [])
@@ -486,115 +468,69 @@ def _get_ingredient_name(drug_name: str) -> str | None:
     if isinstance(items, dict):
         items = [items]
     if not items:
-        return None
+        return {}
 
-    # 성분명 필드: 없으면 제품명으로 fallback
-    return items[0].get("ingrdntName") or items[0].get("itemName") or None
-
-
-def _fetch_dur_taboo(ingredient: str) -> list[dict[str, str]]:
-    """
-    DUR 병용금기 API에서 특정 성분의 금기 조합 목록을 조회합니다.
-    반환값: [{"ingredient": "성분명", "reason": "금기 사유"}, ...]
-    """
-    try:
-        resp = httpx.get(
-            _DUR_API_URL,
-            params={
-                "serviceKey": settings.MFDS_API_KEY,
-                "typeName": ingredient,
-                "pageNo": 1,
-                "numOfRows": 10,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return []
-
-    items: list[Any] = (
-        data.get("body", {}).get("items", [])
-        or data.get("response", {}).get("body", {}).get("items", [])
-        or []
-    )
-    if isinstance(items, dict):
-        items = [items]
-
-    results: list[dict[str, str]] = []
-    for item in items:
-        partner = item.get("MIXTURE_INGR_NAME") or item.get("mixIngrdntName") or ""
-        reason = item.get("PROHBT_CONTENT") or item.get("prohbtContent") or ""
-        if partner:
-            results.append({"ingredient": partner.strip(), "reason": _strip_html(reason)})
-    return results
+    item = items[0]
+    return {
+        "item_name": item.get("itemName", drug_name),
+        "intrc": _strip_html(item.get("intrcQesitm") or ""),
+        "atpn": _strip_html(item.get("atpnQesitm") or ""),
+        "atpn_warn": _strip_html(item.get("atpnWarnQesitm") or ""),
+    }
 
 
 @tool
 def check_drug_interaction(drug1: str, drug2: str) -> str:
-    """두 약물 이름을 입력하면 식품의약품안전처 DUR(의약품 안전사용 서비스) 데이터를 기반으로 병용금기 여부와 주의사항을 조회합니다."""
-    # 영어 약이름이면 한국어로 변환
+    """두 약물 이름을 입력하면 식품의약품안전처 e약은요 데이터를 기반으로 상호작용 및 병용 주의사항을 조회합니다."""
     name1 = _DRUG_NAME_ALIASES.get(drug1.lower().strip(), drug1.strip())
     name2 = _DRUG_NAME_ALIASES.get(drug2.lower().strip(), drug2.strip())
 
-    # 1단계: 성분명 조회
-    ingr1 = _get_ingredient_name(name1) or name1
-    ingr2 = _get_ingredient_name(name2) or name2
+    info1 = _fetch_drug_interaction_info(name1)
+    info2 = _fetch_drug_interaction_info(name2)
 
-    # 2단계: DUR 병용금기 조회 (양방향)
-    taboo1 = _fetch_dur_taboo(ingr1)
-    taboo2 = _fetch_dur_taboo(ingr2)
+    lines: list[str] = [f"■ '{drug1}' + '{drug2}' 약물 상호작용 조회\n"]
+    found_cross = False
 
-    lines: list[str] = [f"■ '{drug1}' + '{drug2}' DUR 병용금기 조회 결과\n"]
-    found = False
-
-    # drug1 성분 기준으로 drug2 성분이 금기 목록에 있는지 확인
-    matched_from_1 = [
-        t for t in taboo1
-        if name2.lower() in t["ingredient"].lower() or ingr2.lower() in t["ingredient"].lower()
-    ]
-    matched_from_2 = [
-        t for t in taboo2
-        if name1.lower() in t["ingredient"].lower() or ingr1.lower() in t["ingredient"].lower()
-    ]
-
-    if matched_from_1:
-        found = True
-        lines.append(f"[{drug1}({ingr1}) 기준 금기 확인]")
-        for t in matched_from_1:
-            lines.append(f"  - 금기 성분: {t['ingredient']}")
-            if t["reason"]:
-                lines.append(f"    사유: {t['reason']}")
+    # drug1의 상호작용 정보에서 drug2 언급 확인
+    intrc1 = info1.get("intrc", "")
+    if intrc1 and (name2 in intrc1 or name2.lower() in intrc1.lower()):
+        found_cross = True
+        lines.append(f"[{drug1} 상호작용 정보에서 {drug2} 언급 확인]")
+        lines.append(intrc1)
         lines.append("")
 
-    if matched_from_2:
-        found = True
-        lines.append(f"[{drug2}({ingr2}) 기준 금기 확인]")
-        for t in matched_from_2:
-            lines.append(f"  - 금기 성분: {t['ingredient']}")
-            if t["reason"]:
-                lines.append(f"    사유: {t['reason']}")
+    # drug2의 상호작용 정보에서 drug1 언급 확인
+    intrc2 = info2.get("intrc", "")
+    if intrc2 and (name1 in intrc2 or name1.lower() in intrc2.lower()):
+        found_cross = True
+        lines.append(f"[{drug2} 상호작용 정보에서 {drug1} 언급 확인]")
+        lines.append(intrc2)
         lines.append("")
 
-    if not found:
-        # DUR에서 직접 매칭 실패 → 전체 금기 목록 안내
-        if taboo1 or taboo2:
-            lines.append("두 약물 간 직접적인 DUR 병용금기는 확인되지 않았습니다.")
-            if taboo1:
-                partners1 = ", ".join({t["ingredient"] for t in taboo1[:5]})
-                lines.append(f"  ※ {drug1}({ingr1})의 주요 금기 성분: {partners1}")
-            if taboo2:
-                partners2 = ", ".join({t["ingredient"] for t in taboo2[:5]})
-                lines.append(f"  ※ {drug2}({ingr2})의 주요 금기 성분: {partners2}")
+    if found_cross:
+        lines.insert(1, "⚠️ 두 약물 간 상호작용 정보가 확인되었습니다. 반드시 의사·약사와 상의하세요.\n")
+    else:
+        # 직접 언급 없음 → 각 약물의 전체 상호작용 주의사항 제공
+        has_info = False
+        if intrc1:
+            has_info = True
+            lines.append(f"[{drug1}의 상호작용 주의사항]")
+            lines.append(intrc1)
+            lines.append("")
+        if intrc2:
+            has_info = True
+            lines.append(f"[{drug2}의 상호작용 주의사항]")
+            lines.append(intrc2)
+            lines.append("")
+        if has_info:
+            lines.append("두 약물 간 직접적인 상호작용 언급은 없으나, 위 주의사항을 참고하시고 필요 시 의사·약사와 상담하세요.")
         else:
             lines.append(
-                "DUR 데이터에서 두 약물의 병용금기 정보를 찾을 수 없습니다.\n"
+                "두 약물의 상호작용 정보를 조회할 수 없습니다.\n"
                 "약물명이 정확한지 확인하거나 약사·의사에게 직접 문의하세요."
             )
-    else:
-        lines.insert(1, "⚠️ 병용금기 성분이 확인되었습니다. 반드시 의사·약사와 상의하세요.\n")
 
-    lines.append("\n※ 이 정보는 식품의약품안전처 DUR 데이터 기반이며, 최종 판단은 전문 의료진에게 문의하세요.")
+    lines.append("\n※ 이 정보는 식품의약품안전처 e약은요 데이터 기반이며, 최종 판단은 전문 의료진에게 문의하세요.")
     return "\n".join(lines).strip()
 
 
@@ -742,10 +678,22 @@ def get_first_aid_guide(situation: str) -> str:
         if alias in situation_lower or alias in situation:
             return _FIRST_AID_GUIDES[key]
 
-    available = "、".join(_FIRST_AID_GUIDES.keys())
+    # DB 미매칭 → LLM이 응급처치 가이드 생성
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    llm = _get_llm()
+    system = (
+        "당신은 응급처치 전문가입니다. 요청한 상황에 대한 응급처치 방법을 "
+        "번호 목록으로 구체적이고 명확하게 안내하세요. "
+        "마지막에는 반드시 119 신고 관련 안내를 포함하세요."
+    )
+    response = llm.invoke([
+        SystemMessage(content=system),
+        HumanMessage(content=f"'{situation}' 상황에서의 응급처치 방법을 안내해주세요."),
+    ])
     return (
-        f"'{situation}'에 대한 응급처치 가이드를 찾지 못했습니다.\n\n"
-        f"현재 안내 가능한 상황: {available}\n\n"
+        f"■ {situation} 응급처치\n\n"
+        f"{response.content.strip()}\n\n"
         "⚠️ 긴급 상황에서는 즉시 119에 신고하세요."
     )
 

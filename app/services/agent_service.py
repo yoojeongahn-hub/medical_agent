@@ -61,16 +61,6 @@ class AgentService:
             api_key=SecretStr(settings.OPENAI_API_KEY),
         )
 
-        #Opik 트레이서 초기화
-        self.opik_tracer = None
-        if settings.OPIK is not None:
-            from opik.integrations.langchain import OpikTracer
-
-            self.opik_tracer = OpikTracer(
-                tags=["medical-agent"],
-                metadata={"model":settings.OPENAI_MODEL}
-            )
-
         # 대화 이력 저장소: process_query 첫 호출 시 async 초기화
         self.checkpointer = None
         self.agent = None
@@ -93,6 +83,7 @@ class AgentService:
 
     def _create_agent(self):
         """LangChain 의료 에이전트 생성 (최초 1회만 실행)"""
+        from app.core.config import settings
         from app.agents.medical_agent import create_medical_agent
         assert self.checkpointer is not None, "checkpointer가 초기화되지 않았습니다. _init_checkpointer를 먼저 호출하세요."
         self.agent = create_medical_agent(
@@ -100,11 +91,15 @@ class AgentService:
             checkpointer=self.checkpointer,
         )
 
-        # opik langgraph 트래킹 적용
-        if self.opik_tracer is not None:
-            from opik.integrations.langchain import track_langgraph
+        # Opik 트레이서 초기화 및 LangGraph 트래킹 적용
+        if settings.OPIK is not None:
+            from opik.integrations.langchain import OpikTracer, track_langgraph
 
-            self.agent = track_langgraph(self.agent, self.opik_tracer)
+            opik_tracer = OpikTracer(
+                tags=["medical-agent"],
+                metadata={"model": settings.OPENAI_MODEL},
+            )
+            self.agent = track_langgraph(self.agent, opik_tracer)
 
     # 실제 대화 로직
     @log_execution
